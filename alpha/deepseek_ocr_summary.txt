@@ -1,0 +1,13 @@
+Summary of "DeepSeek OCR: Artificial Forgetting for Efficient Memory"
+
+The video discusses a new approach to OCR (Optical Character Recognition) and text compression developed by DeepSeek. 
+
+Key Concepts:
+- Artificial Forgetting: Instead of remembering every single token (which is expensive and computationally heavy), the system compresses information, mimicking how humans forget certain details.
+- Process: Text or documents are rendered as images and then compressed using a learned, token-based method (similar to JPEG but for "memories").
+- Efficiency: At 10x compression (using 90% less space), the system can still recover over 96% of the text. Even at 20x compression, accuracy remains around 60%.
+- Technical Implementation: The encoder uses local window attention, a 16x convolutional compressor, and global visual processing to handle high-resolution documents without exploding costs.
+- Applications: Beyond reading documents, this allows for the rapid generation of training data for LLMs (Large Language Models) and VLMs (Vision Language Models), capable of processing over 200,000 pages per day on a single A100 GPU.
+- Limitations: The model may rely on "language priors" (guessing words based on context like autocomplete) when compression becomes too aggressive, rather than purely "seeing" the text.
+
+Conclusion: This is an open-system advancement that helps in creating training data for other open models, significantly increasing the speed and reducing the cost of processing large volumes of document-based data.
