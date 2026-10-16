@@ -3,6 +3,7 @@ export const BASE_URL = process.env.AIRI_URL ?? "http://localhost:8000"
 export interface Health {
   status: string
   agent: string
+  model?: string
 }
 
 export async function getHealth(signal?: AbortSignal): Promise<Health | null> {

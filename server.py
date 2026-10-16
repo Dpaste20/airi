@@ -1,6 +1,9 @@
 import json
+import subprocess
+from contextlib import asynccontextmanager
 from typing import Optional
 
+import emoji
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -11,25 +14,47 @@ from agno.models.ollama import Ollama
 from agno.tools.youtube import YouTubeTools
 from toolkits.systemTools import SystemTools
 
-# ---------------------------------------------------------------------------
-# Agent
-# ---------------------------------------------------------------------------
-agent = Agent(
-    model="ollama:gemma4:31b-cloud",
-    tools=[YouTubeTools(), SystemTools()],
-    system_message="Your name is Airi",
 
-    markdown=True,
+from pathlib import Path
+
+config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
+
+agent = Agent(
+    model=config["model"],
+    tools=[YouTubeTools(), SystemTools()],
+    system_message=config["system_message"],
 )
 
-# ---------------------------------------------------------------------------
-# API
-# ---------------------------------------------------------------------------
-app = FastAPI(title="Airi Agent API", version="1.0.0")
+
+def speak_response(text: str):
+    stop_audio()
+
+    clean_text = emoji.replace_emoji(text, replace="")
+
+    try:
+        subprocess.Popen(["spd-say", clean_text])
+    except Exception as e:
+        print(f"Error executing spd-say: {e}")
+
+
+def stop_audio():
+    try:
+        subprocess.run(["spd-say", "-C"], check=False)
+    except Exception as e:
+        print(f"Error stopping audio: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    stop_audio()
+
+
+app = FastAPI(title="Airi Agent API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten this in production
+    allow_origins=["*"],  
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -48,7 +73,7 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "agent": "Airi"}
+    return {"status": "ok", "agent": config.get("name", "Airi"), "model": config["model"]}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -63,8 +88,12 @@ async def chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+    response_text = str(result.content or "")
+    if response_text:
+        speak_response(response_text)
+
     return ChatResponse(
-        response=str(result.content or ""),
+        response=response_text,
         session_id=req.session_id,
     )
 
@@ -74,6 +103,7 @@ async def chat_stream(req: ChatRequest):
     """Stream the response as Server-Sent Events."""
 
     async def event_generator():
+        full_text = ""
         try:
             async for chunk in agent.arun(
                 req.message,
@@ -83,7 +113,10 @@ async def chat_stream(req: ChatRequest):
             ):
                 text = getattr(chunk, "content", None)
                 if isinstance(text, str) and text:
+                    full_text += text
                     yield f"data: {json.dumps({'delta': text})}\n\n"
+            if full_text:
+                speak_response(full_text)
             yield "data: [DONE]\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
@@ -98,4 +131,4 @@ async def chat_stream(req: ChatRequest):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=8000)

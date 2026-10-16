@@ -1,0 +1,5 @@
+{
+  "name": "<agent name>",
+  "model": "<model name>",
+  "system_message": "<system message>"
+}

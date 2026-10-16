@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import type { ScrollBoxRenderable, SyntaxStyle } from "@opentui/core"
-import { useKeyboard, useTerminalDimensions } from "@opentui/react"
+import { CliRenderEvents } from "@opentui/core"
+import type { ScrollBoxRenderable, Selection, SyntaxStyle } from "@opentui/core"
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { BASE_URL, getHealth, streamChat } from "./api"
 import { LOGO, LOGO_COLORS } from "./logo"
 import { theme as t } from "./theme"
 
 const VERSION = "2.0.0"
-const MODEL = "gemma4:31b-cloud"
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 interface Msg {
@@ -16,6 +16,28 @@ interface Msg {
 }
 
 const newSession = () => crypto.randomUUID()
+
+const TOAST_MS = 1800
+
+/** Native clipboard fallback (OSC52 is also sent, which covers SSH). */
+async function nativeCopy(text: string) {
+  const cmd =
+    process.platform === "darwin"
+      ? ["pbcopy"]
+      : process.platform === "win32"
+        ? ["clip"]
+        : process.env.WAYLAND_DISPLAY
+          ? ["wl-copy"]
+          : ["xclip", "-selection", "clipboard"]
+  try {
+    const proc = Bun.spawn(cmd, { stdin: "pipe", stdout: "ignore", stderr: "ignore" })
+    proc.stdin.write(text)
+    await proc.stdin.end()
+    await proc.exited
+  } catch {
+    // tool missing — OSC52 may still have worked
+  }
+}
 
 function useSpinner(active: boolean) {
   const [i, setI] = useState(0)
@@ -29,6 +51,7 @@ function useSpinner(active: boolean) {
 
 export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const { width } = useTerminalDimensions()
+  const renderer = useRenderer()
 
   const [messages, setMessages] = useState<Msg[]>([])
   const [input, setInput] = useState("")
@@ -36,11 +59,36 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const [online, setOnline] = useState<boolean | null>(null)
   const [agent, setAgent] = useState("Airi")
   const [sessionId, setSessionId] = useState(newSession)
-
+  const [toast, setToast] = useState<string | null>(null)
+  const [model, setModel] = useState("")
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const nextId = useRef(1)
   const spin = useSpinner(busy)
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const showToast = useCallback((text: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current)
+    setToast(text)
+    toastTimer.current = setTimeout(() => setToast(null), TOAST_MS)
+  }, [])
+
+  // ---- copy on select ----------------------------------------------------
+  // "selection" fires once, when the mouse drag ends.
+  useEffect(() => {
+    const onSelection = (sel: Selection) => {
+      const text = sel.getSelectedText()
+      if (!text || !text.trim()) return
+      renderer.copyToClipboardOSC52(text)
+      void nativeCopy(text)
+      showToast("Copied to clipboard")
+    }
+    renderer.on(CliRenderEvents.SELECTION, onSelection)
+    return () => {
+      renderer.off(CliRenderEvents.SELECTION, onSelection)
+      if (toastTimer.current) clearTimeout(toastTimer.current)
+    }
+  }, [renderer, showToast])
 
   // ---- health polling ----------------------------------------------------
   useEffect(() => {
@@ -50,6 +98,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
       if (!alive) return
       setOnline(!!h)
       if (h?.agent) setAgent(h.agent)
+      if (h?.model) setModel(h.model)
     }
     tick()
     const h = setInterval(tick, 5000)
@@ -162,7 +211,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
           <strong>{agent}</strong>
         </text>
         <text fg={t.dim}> · </text>
-        <text fg={t.warn}>{MODEL}</text>
+        <text fg={t.warn}>{model}</text>
         <text fg={t.dim}> · </text>
         <text fg={t.muted}>session {sessionId.slice(0, 8)}</text>
         {busy ? (
@@ -201,6 +250,29 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     </box>
   )
 
+  const toastEl = toast ? (
+    <box
+      position="absolute"
+      top={1}
+      right={2}
+      zIndex={100}
+      flexDirection="row"
+      border={["left", "right"]}
+      borderStyle="heavy"
+      borderColor={t.link}
+      backgroundColor={t.panel}
+      paddingLeft={2}
+      paddingRight={2}
+      paddingTop={1}
+      paddingBottom={1}
+    >
+      <text fg={t.text}>{toast}</text>
+      <text fg={t.dim} onMouseDown={() => setToast(null)}>
+        {"  x"}
+      </text>
+    </box>
+  ) : null
+
   // ---- home screen -------------------------------------------------------
   if (home) {
     return (
@@ -222,6 +294,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
           {hints}
         </box>
         {statusBar}
+        {toastEl}
       </box>
     )
   }
@@ -295,6 +368,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
         {hints}
       </box>
       {statusBar}
+      {toastEl}
     </box>
   )
 }
