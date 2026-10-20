@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 from contextlib import asynccontextmanager
@@ -8,9 +9,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-
+import asyncio, os, tempfile, wave
+from fastapi import Request
 from agno.agent import Agent
-from agno.models.ollama import Ollama
+
 from agno.tools.youtube import YouTubeTools
 from toolkits.systemTools import SystemTools
 
@@ -19,22 +21,45 @@ from pathlib import Path
 
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
 
+system_tools = SystemTools()
+
 agent = Agent(
     model=config["model"],
-    tools=[YouTubeTools(), SystemTools()],
+    tools=[YouTubeTools(), system_tools],
     system_message=config["system_message"],
 )
 
 
-def speak_response(text: str):
+def speak_response(text: str) -> Optional[subprocess.Popen]:
+    """Speak the text. -w makes spd-say block until speech ends, so the returned
+    process can be waited on."""
     stop_audio()
 
     clean_text = emoji.replace_emoji(text, replace="")
 
     try:
-        subprocess.Popen(["spd-say", clean_text])
+        return subprocess.Popen(["spd-say", "-w", "--", clean_text])
     except Exception as e:
         print(f"Error executing spd-say: {e}")
+        return None
+
+
+_background: set[asyncio.Task] = set()
+
+
+async def _finish_response(text: str):
+    """Reply fully delivered + spoken -> then run any queued power action (3s later)."""
+    proc = speak_response(text) if text else None
+    if proc:
+        await asyncio.to_thread(proc.wait)
+    system_tools.run_pending(delay=3)
+
+
+def finish_response(text: str):
+    # Fire-and-forget so the HTTP/SSE response isn't held open while speaking.
+    task = asyncio.create_task(_finish_response(text))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 def stop_audio():
@@ -54,7 +79,7 @@ app = FastAPI(title="Airi Agent API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,6 +104,7 @@ async def health():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     """Return the full response in one JSON payload."""
+    system_tools.clear_pending()
     try:
         result = await agent.arun(
             req.message,
@@ -86,11 +112,11 @@ async def chat(req: ChatRequest):
             user_id=req.user_id,
         )
     except Exception as e:
+        system_tools.clear_pending()
         raise HTTPException(status_code=500, detail=str(e))
 
     response_text = str(result.content or "")
-    if response_text:
-        speak_response(response_text)
+    finish_response(response_text)
 
     return ChatResponse(
         response=response_text,
@@ -104,6 +130,7 @@ async def chat_stream(req: ChatRequest):
 
     async def event_generator():
         full_text = ""
+        system_tools.clear_pending()
         try:
             async for chunk in agent.arun(
                 req.message,
@@ -115,10 +142,10 @@ async def chat_stream(req: ChatRequest):
                 if isinstance(text, str) and text:
                     full_text += text
                     yield f"data: {json.dumps({'delta': text})}\n\n"
-            if full_text:
-                speak_response(full_text)
             yield "data: [DONE]\n\n"
+            finish_response(full_text)
         except Exception as e:
+            system_tools.clear_pending()
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
     return StreamingResponse(

@@ -2,6 +2,7 @@ import json
 import os
 import platform
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -10,7 +11,15 @@ from agno.tools.toolkit import Toolkit
 
 class SystemTools(Toolkit):
     def __init__(self, **kwargs):
-        tools = [self.getBattery, self.getSystemInfo, self.getDateTime]
+        self.pending_power: str | None = None  # "poweroff" | "reboot" | "suspend"
+        tools = [
+            self.getBattery,
+            self.getSystemInfo,
+            self.getDateTime,
+            self.shutdown,
+            self.restart,
+            self.sleep,
+        ]
         super().__init__(name="system_tools", tools=tools, **kwargs)
 
     # ---------- helpers ----------
@@ -21,7 +30,67 @@ class SystemTools(Toolkit):
         except Exception:
             return None
 
+    @staticmethod
+    def _power_cmd(action: str) -> list[str] | None:
+        cmds = {
+            "poweroff": [["systemctl", "poweroff"], ["shutdown", "-h", "now"]],
+            "reboot": [["systemctl", "reboot"], ["shutdown", "-r", "now"]],
+            "suspend": [["systemctl", "suspend"], ["pm-suspend"]],
+        }[action]
+        return next((c for c in cmds if shutil.which(c[0])), None)
+
+    def _schedule(self, action: str, label: str) -> str:
+        """Queue the action only. Nothing runs until the server calls run_pending()
+        after the full reply has been delivered."""
+        if self._power_cmd(action) is None:
+            return json.dumps({"ok": False, "error": f"No {label} command found."})
+        self.pending_power = action
+        return json.dumps(
+            {
+                "ok": True,
+                "action": label,
+                "message": f"{label.capitalize()} scheduled. It will run 3 seconds after "
+                "your reply is finished. Briefly tell the user, then end your reply.",
+            }
+        )
+
+    def clear_pending(self) -> None:
+        self.pending_power = None
+
+    def run_pending(self, delay: int = 3) -> str | None:
+        """Called by the server once the response is complete. Spawns a detached
+        process that sleeps `delay`s, then runs the queued power action."""
+        action, self.pending_power = self.pending_power, None
+        if action is None:
+            return None
+        cmd = self._power_cmd(action)
+        if cmd is None:
+            return None
+        subprocess.Popen(
+            ["sh", "-c", f"sleep {delay}; exec {' '.join(cmd)}"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return action
+
     # ---------- tools ----------
+    def shutdown(self) -> str:
+        """Shut down the machine. Schedules it to run 3 seconds after your reply finishes.
+        Returns JSON."""
+        return self._schedule("poweroff", "shutdown")
+
+    def restart(self) -> str:
+        """Restart (reboot) the machine. Schedules it to run 3 seconds after your reply finishes.
+        Returns JSON."""
+        return self._schedule("reboot", "restart")
+
+    def sleep(self) -> str:
+        """Put the machine to sleep (suspend to RAM). Schedules it to run 3 seconds after your reply finishes.
+        Returns JSON."""
+        return self._schedule("suspend", "sleep")
+
     def getBattery(self) -> str:
         """Get battery status of the machine: percentage, charging state, and health.
         Returns JSON. Reports no battery on desktops/VMs."""

@@ -195,7 +195,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     >
       <input
         value={input}
-        placeholder={home ? `Ask anything… "What's on YouTube about OpenTUI?"` : "Message Airi…"}
+        placeholder={home ? `Ask anything… "What's on YouTube about F-22?"` : "Message Airi…"}
         placeholderColor={t.muted}
         textColor={t.text}
         backgroundColor={t.panel}
