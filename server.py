@@ -3,7 +3,7 @@ import json
 import subprocess
 from contextlib import asynccontextmanager
 from typing import Optional
-
+from pathlib import Path
 import emoji
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,20 +12,65 @@ from pydantic import BaseModel
 import asyncio, os, tempfile, wave
 from fastapi import Request
 from agno.agent import Agent
+from agno.models.ollama import Ollama
 
 from agno.tools.youtube import YouTubeTools
 from toolkits.systemTools import SystemTools
-
-
+from toolkits.bashTools import BashTools
+from agno.skills import Skills, LocalSkills
+from agno.db.sqlite import SqliteDb
 from pathlib import Path
 
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
 
+
+class OllamaThinking(Ollama):
+    """Agno's Ollama adapter ignores Ollama's native `thinking` field."""
+
+    @staticmethod
+    def _thinking(response) -> str:
+        try:
+            message = response["message"]
+        except (KeyError, TypeError, AttributeError):
+            message = getattr(response, "message", None)
+        if message is None:
+            return ""
+        thinking = (
+            message.get("thinking")
+            if hasattr(message, "get")
+            else getattr(message, "thinking", None)
+        )
+        return thinking or ""
+
+    def _parse_provider_response(self, response):
+        model_response = super()._parse_provider_response(response)
+        thinking = self._thinking(response)
+        if thinking:
+            model_response.reasoning_content = (model_response.reasoning_content or "") + thinking
+        return model_response
+
+    def _parse_provider_response_delta(self, response):
+        model_response = super()._parse_provider_response_delta(response)
+        thinking = self._thinking(response)
+        if thinking:
+            model_response.reasoning_content = (model_response.reasoning_content or "") + thinking
+        return model_response
+
+
+def build_model(spec: str):
+    if spec.startswith("ollama:"):
+        return OllamaThinking(id=spec.split(":", 1)[1])
+    return spec
+
+
 system_tools = SystemTools()
 
 agent = Agent(
-    model=config["model"],
-    tools=[YouTubeTools(), system_tools],
+    model=build_model(config["model"]),
+    tools=[YouTubeTools(), system_tools , BashTools()],
+    db=SqliteDb(db_file="data/agent.db"),
+    add_history_to_context=True,
+    skills=Skills(loaders=[LocalSkills(str(Path(__file__).parent / "skills"))]),
     system_message=config["system_message"],
 )
 
@@ -138,6 +183,11 @@ async def chat_stream(req: ChatRequest):
                 session_id=req.session_id,
                 user_id=req.user_id,
             ):
+                # Reasoning arrives as its own delta; the TUI renders it dimmed above the answer.
+                thinking = getattr(chunk, "reasoning_content", None)
+                if isinstance(thinking, str) and thinking:
+                    yield f"data: {json.dumps({'thinking': thinking})}\n\n"
+
                 text = getattr(chunk, "content", None)
                 if isinstance(text, str) and text:
                     full_text += text

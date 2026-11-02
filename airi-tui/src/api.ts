@@ -16,12 +16,17 @@ export async function getHealth(signal?: AbortSignal): Promise<Health | null> {
   }
 }
 
-/** POST /chat/stream and yield text deltas from the SSE stream. */
+export interface StreamChunk {
+  text?: string
+  thinking?: string
+}
+
+/** POST /chat/stream and yield text / thinking deltas from the SSE stream. */
 export async function* streamChat(
   message: string,
   sessionId: string,
   signal: AbortSignal,
-): AsyncGenerator<string> {
+): AsyncGenerator<StreamChunk> {
   const res = await fetch(`${BASE_URL}/chat/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -47,9 +52,10 @@ export async function* streamChat(
         if (!line.startsWith("data:")) continue
         const data = line.slice(5).trim()
         if (data === "[DONE]") return
-        const payload = JSON.parse(data) as { delta?: string; error?: string }
+        const payload = JSON.parse(data) as { delta?: string; thinking?: string; error?: string }
         if (payload.error) throw new Error(payload.error)
-        if (payload.delta) yield payload.delta
+        if (payload.thinking) yield { thinking: payload.thinking }
+        if (payload.delta) yield { text: payload.delta }
       }
     }
   }

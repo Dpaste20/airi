@@ -3,7 +3,7 @@ import { createRoot } from "@opentui/react"
 import { App } from "./app"
 import { createMarkdownStyle } from "./markdown-theme"
 
-const renderer = await createCliRenderer({ exitOnCtrlC: true })
+const renderer = await createCliRenderer({ exitOnCtrlC: true, useKittyKeyboard: { events: true } })
 const syntaxStyle = createMarkdownStyle(renderer)
 
 try {

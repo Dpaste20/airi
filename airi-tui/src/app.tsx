@@ -13,6 +13,7 @@ interface Msg {
   id: number
   role: "user" | "assistant" | "error"
   text: string
+  thinking?: string
 }
 
 const newSession = () => crypto.randomUUID()
@@ -133,21 +134,25 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
 
       const ac = new AbortController()
       abortRef.current = ac
-      const patch = (fn: (prev: string) => string) =>
-        setMessages((m) => m.map((x) => (x.id === botId ? { ...x, text: fn(x.text) } : x)))
+      const patch = (fn: (prev: Msg) => Msg) =>
+        setMessages((m) => m.map((x) => (x.id === botId ? fn(x) : x)))
 
       try {
-        for await (const delta of streamChat(text, sessionId, ac.signal)) {
-          patch((p) => p + delta)
+        for await (const chunk of streamChat(text, sessionId, ac.signal)) {
+          patch((m) => ({
+            ...m,
+            text: chunk.text ? m.text + chunk.text : m.text,
+            thinking: chunk.thinking ? (m.thinking ?? "") + chunk.thinking : m.thinking,
+          }))
         }
       } catch (e) {
         if (!ac.signal.aborted) {
           setMessages((m) => [
-            ...m.filter((x) => !(x.id === botId && x.text === "")),
+            ...m.filter((x) => !(x.id === botId && !x.text && !x.thinking)),
             { id: nextId.current++, role: "error", text: e instanceof Error ? e.message : String(e) },
           ])
         } else {
-          patch((p) => (p ? p + " ⎯ interrupted" : "interrupted"))
+          patch((m) => ({ ...m, text: m.text ? m.text + " ⎯ interrupted" : "interrupted" }))
         }
       } finally {
         setBusy(false)
@@ -195,7 +200,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     >
       <input
         value={input}
-        placeholder={home ? `Ask anything… "What's on YouTube about F-22?"` : "Message Airi…"}
+        placeholder={home ? `Ask anything… "What's on YouTube about OpenTUI?"` : "Message Airi…"}
         placeholderColor={t.muted}
         textColor={t.text}
         backgroundColor={t.panel}
@@ -347,6 +352,21 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
             </box>
           ) : (
             <box key={m.id} paddingLeft={2} paddingRight={2} marginTop={1} flexShrink={0}>
+              {m.thinking ? (
+                <box
+                  border={["left"]}
+                  borderStyle="single"
+                  borderColor={t.dim}
+                  paddingLeft={1}
+                  marginBottom={m.text ? 1 : 0}
+                  flexShrink={0}
+                >
+                  <text fg={t.dim}>{busy && m.id === messages[messages.length - 1]?.id && !m.text ? `${spin} thinking` : "thinking"}</text>
+                  <text fg={t.muted} wrapMode="word">
+                    <em>{m.thinking}</em>
+                  </text>
+                </box>
+              ) : null}
               {m.text ? (
                 <markdown
                   content={m.text}
@@ -355,9 +375,9 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
                   conceal
                   streaming={busy && m.id === messages[messages.length - 1]?.id}
                 />
-              ) : (
+              ) : !m.thinking ? (
                 <text fg={t.accent}>{busy ? spin : ""}</text>
-              )}
+              ) : null}
             </box>
           ),
         )}
