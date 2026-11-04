@@ -1,16 +1,18 @@
 import asyncio
 import json
+import os
+import shutil
 import subprocess
 from contextlib import asynccontextmanager
 from typing import Optional
 from pathlib import Path
+from urllib.parse import urlparse
 import emoji
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-import asyncio, os, tempfile, wave
-from fastapi import Request
 from agno.agent import Agent
 from agno.models.ollama import Ollama
 
@@ -19,9 +21,21 @@ from toolkits.systemTools import SystemTools
 from toolkits.bashTools import BashTools
 from agno.skills import Skills, LocalSkills
 from agno.db.sqlite import SqliteDb
-from pathlib import Path
 
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
+
+# ---- ASR (speech.cpp `speech serve`) ----
+SPEECH_URL = os.environ.get("SPEECH_URL", "http://127.0.0.1:8080")
+ASR_MODEL = config.get("asr_model", "qwen3-asr-0.6b")
+ASR_FIELDS = {
+    k: v
+    for k, v in {
+        "language": config.get("asr_language"),
+        "prompt": ", ".join(config.get("asr_hotwords", [])),
+    }.items()
+    if v
+}
+_speech_proc: Optional[subprocess.Popen] = None
 
 
 class OllamaThinking(Ollama):
@@ -67,7 +81,7 @@ system_tools = SystemTools()
 
 agent = Agent(
     model=build_model(config["model"]),
-    tools=[YouTubeTools(), system_tools , BashTools()],
+    tools=[YouTubeTools(), system_tools, BashTools()],
     db=SqliteDb(db_file="data/agent.db"),
     add_history_to_context=True,
     skills=Skills(loaders=[LocalSkills(str(Path(__file__).parent / "skills"))]),
@@ -116,7 +130,20 @@ def stop_audio():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _speech_proc
+    # Spawn the ASR backend unless SPEECH_URL points at one you run yourself.
+    if not os.environ.get("SPEECH_URL") and shutil.which("speech"):
+        port = urlparse(SPEECH_URL).port or 8081
+        _speech_proc = subprocess.Popen(
+            ["speech", "serve", ASR_MODEL, "--host", "127.0.0.1", "--port", str(port)]
+        )
     yield
+    if _speech_proc:
+        _speech_proc.terminate()
+        try:
+            _speech_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _speech_proc.kill()
     stop_audio()
 
 
@@ -144,6 +171,32 @@ class ChatResponse(BaseModel):
 @app.get("/health")
 async def health():
     return {"status": "ok", "agent": config.get("name", "Airi"), "model": config["model"]}
+
+
+@app.post("/transcribe")
+async def transcribe(request: Request):
+    """Raw audio/wav body in, {"text": ...} out. Proxies to speech.cpp."""
+    audio = await request.body()
+    if not audio:
+        raise HTTPException(status_code=400, detail="empty body")
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                f"{SPEECH_URL}/v1/audio/transcriptions",
+                files={"file": ("speech.wav", audio, "audio/wav")},
+                data=ASR_FIELDS or None,
+            )
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"ASR backend: {e}")
+    return {"text": (r.json().get("text") or "").strip()}
+
+
+@app.post("/audio/stop")
+async def audio_stop():
+    """Barge-in: the TUI calls this when recording starts so Airi stops talking."""
+    await asyncio.to_thread(stop_audio)
+    return {"ok": True}
 
 
 @app.post("/chat", response_model=ChatResponse)

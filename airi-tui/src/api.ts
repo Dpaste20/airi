@@ -60,3 +60,18 @@ export async function* streamChat(
     }
   }
 }
+
+/** POST a WAV to /transcribe (proxied to speech.cpp) and return the text. */
+export async function transcribe(wav: Uint8Array<ArrayBuffer>, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(`${BASE_URL}/transcribe`, {
+    method: "POST",
+    headers: { "Content-Type": "audio/wav" },
+    body: new Blob([wav], { type: "audio/wav" }),
+    signal,
+  })
+  if (!res.ok) throw new Error(`ASR ${res.status}: ${(await res.text()).slice(0, 200)}`)
+  return (((await res.json()) as { text?: string }).text ?? "").trim()
+}
+
+/** Barge-in: stop Airi's current speech. */
+export const stopAudio = () => void fetch(`${BASE_URL}/audio/stop`, { method: "POST" }).catch(() => {})

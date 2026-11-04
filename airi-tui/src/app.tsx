@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { CliRenderEvents } from "@opentui/core"
 import type { ScrollBoxRenderable, Selection, SyntaxStyle } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
-import { BASE_URL, getHealth, streamChat } from "./api"
+import { BASE_URL, getHealth, streamChat, transcribe, stopAudio } from "./api"
 import { LOGO, LOGO_COLORS } from "./logo"
+import { startRecording, type Recording } from "./recorder"
 import { theme as t } from "./theme"
 
 const VERSION = "2.0.0"
@@ -62,10 +63,13 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const [sessionId, setSessionId] = useState(newSession)
   const [toast, setToast] = useState<string | null>(null)
   const [model, setModel] = useState("")
+  const [voice, setVoice] = useState<"idle" | "rec" | "asr">("idle")
+  const [recSecs, setRecSecs] = useState(0)
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const recRef = useRef<Recording | null>(null)
   const nextId = useRef(1)
-  const spin = useSpinner(busy)
+  const spin = useSpinner(busy || voice === "asr")
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const showToast = useCallback((text: string) => {
@@ -109,9 +113,20 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     }
   }, [])
 
+  // ---- recording timer ---------------------------------------------------
+  useEffect(() => {
+    if (voice !== "rec") return
+    setRecSecs(0)
+    const h = setInterval(() => setRecSecs((n) => n + 1), 1000)
+    return () => clearInterval(h)
+  }, [voice])
+
   // ---- actions -----------------------------------------------------------
   const reset = useCallback(() => {
     abortRef.current?.abort()
+    recRef.current?.cancel()
+    recRef.current = null
+    setVoice("idle")
     setMessages([])
     setBusy(false)
     setSessionId(newSession())
@@ -162,8 +177,51 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     [busy, sessionId],
   )
 
+  const fail = useCallback((e: unknown) => {
+    setMessages((m) => [
+      ...m,
+      { id: nextId.current++, role: "error", text: e instanceof Error ? e.message : String(e) },
+    ])
+  }, [])
+
+  /** ctrl+r: start recording, press again to stop → transcribe → send. */
+  const toggleVoice = useCallback(async () => {
+    if (busy || voice === "asr") return
+    if (voice === "idle") {
+      try {
+        recRef.current = startRecording()
+        stopAudio()
+        setVoice("rec")
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    const rec = recRef.current
+    recRef.current = null
+    setVoice("asr")
+    try {
+      const text = await transcribe(await rec!.stop())
+      setVoice("idle")
+      if (text) void send(text)
+      else showToast("No speech detected")
+    } catch (e) {
+      setVoice("idle")
+      fail(e)
+    }
+  }, [busy, voice, send, fail, showToast])
+
   useKeyboard((key) => {
-    if (key.name === "escape" && busy) abortRef.current?.abort()
+    if (key.name === "escape") {
+      if (voice === "rec") {
+        recRef.current?.cancel()
+        recRef.current = null
+        setVoice("idle")
+      } else if (busy) {
+        abortRef.current?.abort()
+      }
+    }
+    if (key.ctrl && key.name === "r") void toggleVoice()
     if (key.ctrl && key.name === "n") reset()
     if (key.ctrl && key.name === "l") setMessages([])
   })
@@ -182,13 +240,14 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const home = messages.length === 0
   const statusColor = online === null ? t.dim : online ? t.ok : t.err
   const statusText = online === null ? "connecting" : online ? "online" : "offline"
+  const recLabel = `${Math.floor(recSecs / 60)}:${String(recSecs % 60).padStart(2, "0")}`
 
   // ---- prompt box (shared by both screens) -------------------------------
   const prompt = (
     <box
       border={["left"]}
       borderStyle="heavy"
-      borderColor={busy ? t.dim : t.accent}
+      borderColor={voice === "rec" ? t.err : busy ? t.dim : t.accent}
       backgroundColor={t.panel}
       flexDirection="column"
       paddingLeft={1}
@@ -225,18 +284,36 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
             {spin} thinking
           </text>
         ) : null}
+        {voice === "rec" ? (
+          <text fg={t.err}>{`  ● rec ${recLabel}`}</text>
+        ) : voice === "asr" ? (
+          <text fg={t.accent}>{`  ${spin} transcribing`}</text>
+        ) : null}
       </box>
     </box>
   )
 
   const hints = (
     <box flexDirection="row" justifyContent="flex-end" width={home ? Math.min(76, width - 4) : "100%"} flexShrink={0}>
-      {busy ? (
+      {voice === "rec" ? (
         <>
+          <text fg={t.text}>ctrl+r</text>
+          <text fg={t.muted}> send  </text>
           <text fg={t.text}>esc</text>
-          <text fg={t.muted}> interrupt  </text>
+          <text fg={t.muted}> cancel  </text>
         </>
-      ) : null}
+      ) : (
+        <>
+          {busy ? (
+            <>
+              <text fg={t.text}>esc</text>
+              <text fg={t.muted}> interrupt  </text>
+            </>
+          ) : null}
+          <text fg={t.text}>ctrl+r</text>
+          <text fg={t.muted}> voice  </text>
+        </>
+      )}
       <text fg={t.text}>ctrl+n</text>
       <text fg={t.muted}> new session  </text>
       <text fg={t.text}>ctrl+c</text>
