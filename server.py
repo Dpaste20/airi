@@ -17,6 +17,7 @@ from agno.agent import Agent
 from agno.models.ollama import Ollama
 
 from agno.tools.youtube import YouTubeTools
+from agno.tools.shell import ShellTools
 from toolkits.systemTools import SystemTools
 from toolkits.bashTools import BashTools
 from agno.skills import Skills, LocalSkills
@@ -25,7 +26,7 @@ from agno.db.sqlite import SqliteDb
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
 
 # ---- ASR (speech.cpp `speech serve`) ----
-SPEECH_URL = os.environ.get("SPEECH_URL", "http://127.0.0.1:8080")
+SPEECH_URL = os.environ.get("SPEECH_URL", "http://127.0.0.1:5000")
 ASR_MODEL = config.get("asr_model", "qwen3-asr-0.6b")
 ASR_FIELDS = {
     k: v
@@ -81,11 +82,11 @@ system_tools = SystemTools()
 
 agent = Agent(
     model=build_model(config["model"]),
-    tools=[YouTubeTools(), system_tools, BashTools()],
+    tools=[YouTubeTools(), system_tools , ShellTools()],
     db=SqliteDb(db_file="data/agent.db"),
     add_history_to_context=True,
     skills=Skills(loaders=[LocalSkills(str(Path(__file__).parent / "skills"))]),
-    system_message=config["system_message"],
+    system_message=(Path(__file__).parent / "core-directives" / "SystemMessage.md").read_text(),
 )
 
 
