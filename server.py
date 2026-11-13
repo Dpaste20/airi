@@ -23,6 +23,8 @@ from toolkits.bashTools import BashTools
 from agno.skills import Skills, LocalSkills
 from agno.db.sqlite import SqliteDb
 
+from router import route
+
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
 
 # ---- ASR (speech.cpp `speech serve`) ----
@@ -205,8 +207,10 @@ async def chat(req: ChatRequest):
     """Return the full response in one JSON payload."""
     system_tools.clear_pending()
     try:
+        # d1 decision model: pick a tool (auto-run no-arg tools, or hint the agent)
+        message, _ = await route(req.message, system_tools)
         result = await agent.arun(
-            req.message,
+            message,
             session_id=req.session_id,
             user_id=req.user_id,
         )
@@ -231,8 +235,14 @@ async def chat_stream(req: ChatRequest):
         full_text = ""
         system_tools.clear_pending()
         try:
+            # d1 decision model: pick a tool (auto-run no-arg tools, or hint the agent)
+            message, decision = await route(req.message, system_tools)
+            if decision:
+                # Extra SSE field; the TUI currently ignores it.
+                yield f"data: {json.dumps({'route': decision})}\n\n"
+
             async for chunk in agent.arun(
-                req.message,
+                message,
                 stream=True,
                 session_id=req.session_id,
                 user_id=req.user_id,

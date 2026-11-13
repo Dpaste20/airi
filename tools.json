@@ -1,0 +1,65 @@
+{
+  "threshold": 0.85,
+  "timeout": 3,
+  "tools": {
+    "getBattery": {
+      "description": "Battery percentage, charging state, battery health, AC plugged in",
+      "mode": "auto"
+    },
+    "getNetwork": {
+      "description": "Network interfaces, wifi/ethernet state, IP addresses",
+      "mode": "auto"
+    },
+    "getStorage": {
+      "description": "Disk space, used and free storage, partitions",
+      "mode": "auto"
+    },
+    "getAudio": {
+      "description": "Current speaker volume level and mute status",
+      "mode": "auto"
+    },
+    "getDisplay": {
+      "description": "Connected monitors and screen resolution",
+      "mode": "auto"
+    },
+    "getBluetooth": {
+      "description": "Paired Bluetooth devices",
+      "mode": "auto"
+    },
+    "getProcesses": {
+      "description": "Top processes by CPU and memory usage, what is slowing the machine",
+      "mode": "auto"
+    },
+    "getSystemSettings": {
+      "description": "OS, kernel, uptime, hostname, current date, time and timezone",
+      "mode": "auto"
+    },
+    "getLogs": {
+      "description": "Recent system log entries for diagnostics",
+      "mode": "auto"
+    },
+    "shutdown": {
+      "description": "User explicitly asks to power off / shut down the machine",
+      "mode": "hint",
+      "threshold": 0.97
+    },
+    "restart": {
+      "description": "User explicitly asks to reboot / restart the machine",
+      "mode": "hint",
+      "threshold": 0.97
+    },
+    "sleep": {
+      "description": "User explicitly asks to suspend / sleep the machine",
+      "mode": "hint",
+      "threshold": 0.97
+    },
+    "youtube": {
+      "description": "A YouTube video, its captions, transcript, or searching YouTube",
+      "mode": "hint"
+    },
+    "shell": {
+      "description": "Run a shell command, work with files, git, or the terminal",
+      "mode": "hint"
+    }
+  }
+}
