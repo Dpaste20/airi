@@ -3,6 +3,9 @@ import { CliRenderEvents } from "@opentui/core"
 import type { ScrollBoxRenderable, Selection, SyntaxStyle } from "@opentui/core"
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react"
 import { BASE_URL, getHealth, streamChat, transcribe, stopAudio } from "./api"
+import { isFile, loadAttachment, resolvePath, type Attachment } from "./attach"
+import commandsJson from "./commands.json"
+import { pickFiles } from "./picker"
 import { LOGO, LOGO_COLORS } from "./logo"
 import { startRecording, type Recording } from "./recorder"
 import { theme as t } from "./theme"
@@ -16,6 +19,16 @@ interface Msg {
   text: string
   thinking?: string
 }
+
+interface Command {
+  name: string
+  description: string
+  args?: string
+  optionalArgs?: boolean
+}
+
+const COMMANDS = commandsJson as Command[]
+const NAME_PAD = Math.max(...COMMANDS.map((c) => c.name.length)) + 4
 
 const newSession = () => crypto.randomUUID()
 
@@ -65,10 +78,13 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const [model, setModel] = useState("")
   const [voice, setVoice] = useState<"idle" | "rec" | "asr">("idle")
   const [recSecs, setRecSecs] = useState(0)
+  const [files, setFiles] = useState<Attachment[]>([])
+  const [sel, setSel] = useState(0)
   const scrollRef = useRef<ScrollBoxRenderable | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const recRef = useRef<Recording | null>(null)
   const nextId = useRef(1)
+  const picking = useRef(false)
   const spin = useSpinner(busy || voice === "asr")
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -122,12 +138,55 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   }, [voice])
 
   // ---- actions -----------------------------------------------------------
+  const fail = useCallback((e: unknown) => {
+    setMessages((m) => [
+      ...m,
+      { id: nextId.current++, role: "error", text: e instanceof Error ? e.message : String(e) },
+    ])
+  }, [])
+
+  /** Convert a file to markdown and queue it for the next message. */
+  const addFile = useCallback(
+    async (raw: string) => {
+      const p = resolvePath(raw, false)
+      if (!p || !isFile(p)) return fail(new Error(`not a file: ${raw.trim()}`))
+      try {
+        const a = await loadAttachment(p)
+        setFiles((f) => [...f.filter((x) => x.path !== a.path), a])
+        showToast(a.truncated ? `Attached ${a.name} (truncated)` : `Attached ${a.name}`)
+      } catch (e) {
+        fail(e)
+      }
+    },
+    [fail, showToast],
+  )
+
+  const run = useCallback(
+    (name: string, arg: string) => {
+      if (name !== "attachfile") return
+      if (arg) return void addFile(arg)
+      if (picking.current) return
+      picking.current = true
+      void (async () => {
+        try {
+          for (const p of await pickFiles()) await addFile(p)
+        } catch (e) {
+          fail(e)
+        } finally {
+          picking.current = false
+        }
+      })()
+    },
+    [addFile, fail],
+  )
+
   const reset = useCallback(() => {
     abortRef.current?.abort()
     recRef.current?.cancel()
     recRef.current = null
     setVoice("idle")
     setMessages([])
+    setFiles([])
     setBusy(false)
     setSessionId(newSession())
   }, [])
@@ -135,15 +194,30 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const send = useCallback(
     async (raw: string) => {
       const text = raw.trim()
-      if (!text || busy) return
+      if (text.startsWith("/")) {
+        const sp = text.indexOf(" ")
+        const name = (sp === -1 ? text.slice(1) : text.slice(1, sp)).toLowerCase()
+        const arg = sp === -1 ? "" : text.slice(sp + 1).trim()
+        if (!COMMANDS.some((c) => c.name === name)) return showToast(`Unknown command: /${name}`)
+        setInput("")
+        run(name, arg)
+        return
+      }
+      if ((!text && !files.length) || busy) return
+
+      const payload = files.length
+        ? files.map((f) => `<file name="${f.name}">\n${f.text}\n</file>`).join("\n\n") + `\n\n${text}`
+        : text
+      const shown = files.length ? `${files.map((f) => `[${f.name}]`).join(" ")}\n${text}`.trim() : text
 
       const userId = nextId.current++
       const botId = nextId.current++
       setInput("")
+      setFiles([])
       setBusy(true)
       setMessages((m) => [
         ...m,
-        { id: userId, role: "user", text },
+        { id: userId, role: "user", text: shown },
         { id: botId, role: "assistant", text: "" },
       ])
 
@@ -153,7 +227,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
         setMessages((m) => m.map((x) => (x.id === botId ? fn(x) : x)))
 
       try {
-        for await (const chunk of streamChat(text, sessionId, ac.signal)) {
+        for await (const chunk of streamChat(payload, sessionId, ac.signal)) {
           patch((m) => ({
             ...m,
             text: chunk.text ? m.text + chunk.text : m.text,
@@ -174,15 +248,8 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
         abortRef.current = null
       }
     },
-    [busy, sessionId],
+    [busy, sessionId, files, run, showToast],
   )
-
-  const fail = useCallback((e: unknown) => {
-    setMessages((m) => [
-      ...m,
-      { id: nextId.current++, role: "error", text: e instanceof Error ? e.message : String(e) },
-    ])
-  }, [])
 
   /** ctrl+r: start recording, press again to stop → transcribe → send. */
   const toggleVoice = useCallback(async () => {
@@ -211,7 +278,39 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
     }
   }, [busy, voice, send, fail, showToast])
 
+  // ---- slash command menu ------------------------------------------------
+  const q = input.startsWith("/") && !input.includes(" ") ? input.slice(1).toLowerCase() : null
+  const matches = q === null ? [] : COMMANDS.filter((c) => c.name.startsWith(q))
+  const menuOpen = matches.length > 0
+  const idx = Math.min(sel, Math.max(matches.length - 1, 0))
+
+  const pick = useCallback(
+    (c: Command) => {
+      if (c.args && !c.optionalArgs) {
+        setInput(`/${c.name} `)
+        setSel(0)
+      } else {
+        setInput("")
+        run(c.name, "")
+      }
+    },
+    [run],
+  )
+
+  /** tab: complete the name only (so a path can be typed after it). */
+  const complete = useCallback((c: Command) => {
+    setInput(`/${c.name}${c.args ? " " : ""}`)
+    setSel(0)
+  }, [])
+
   useKeyboard((key) => {
+    if (menuOpen) {
+      if (key.name === "down") setSel((idx + 1) % matches.length)
+      else if (key.name === "up") setSel((idx - 1 + matches.length) % matches.length)
+      else if (key.name === "tab") complete(matches[idx])
+      else if (key.name === "escape") setInput("")
+      if (["down", "up", "tab", "escape"].includes(key.name)) return
+    }
     if (key.name === "escape") {
       if (voice === "rec") {
         recRef.current?.cancel()
@@ -242,6 +341,28 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
   const statusText = online === null ? "connecting" : online ? "online" : "offline"
   const recLabel = `${Math.floor(recSecs / 60)}:${String(recSecs % 60).padStart(2, "0")}`
 
+  const menu = menuOpen ? (
+    <box
+      flexDirection="column"
+      backgroundColor={t.panel}
+      width={home ? Math.min(76, width - 4) : "100%"}
+      flexShrink={0}
+    >
+      {matches.map((c, i) => (
+        <box
+          key={c.name}
+          flexDirection="row"
+          backgroundColor={i === idx ? t.accent : t.panel}
+          paddingLeft={1}
+          paddingRight={1}
+        >
+          <text fg={i === idx ? t.bg : t.text}>{`/${c.name}`.padEnd(NAME_PAD)}</text>
+          <text fg={i === idx ? t.bg : t.muted}>{c.description}</text>
+        </box>
+      ))}
+    </box>
+  ) : null
+
   // ---- prompt box (shared by both screens) -------------------------------
   const prompt = (
     <box
@@ -257,6 +378,9 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
       width={home ? Math.min(76, width - 4) : "100%"}
       flexShrink={0}
     >
+      {files.length ? (
+        <text fg={t.link}>{files.map((f) => `[${f.name}${f.truncated ? "…" : ""}]`).join("  ")}</text>
+      ) : null}
       <input
         value={input}
         placeholder={home ? `Ask anything… "What's on YouTube about OpenTUI?"` : "Message Airi…"}
@@ -266,8 +390,18 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
         focusedBackgroundColor={t.panel}
         focusedTextColor={t.text}
         focused
-        onInput={setInput}
-        onSubmit={() => send(input)}
+        onInput={(v) => {
+          // dragging a file onto the terminal pastes its path → attach it
+          const p = resolvePath(v, true)
+          if (p && isFile(p)) {
+            setInput("")
+            void addFile(p)
+          } else {
+            setInput(v)
+            setSel(0)
+          }
+        }}
+        onSubmit={() => (menuOpen ? pick(matches[idx]) : send(input))}
       />
       <box height={1} />
       <box flexDirection="row">
@@ -312,6 +446,8 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
           ) : null}
           <text fg={t.text}>ctrl+r</text>
           <text fg={t.muted}> voice  </text>
+          <text fg={t.text}>/</text>
+          <text fg={t.muted}> commands  </text>
         </>
       )}
       <text fg={t.text}>ctrl+n</text>
@@ -372,6 +508,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
             {agent} · local-first agent
           </text>
           <box height={1} />
+          {menu}
           {prompt}
           {hints}
         </box>
@@ -461,6 +598,7 @@ export function App({ syntaxStyle }: { syntaxStyle: SyntaxStyle }) {
       </scrollbox>
 
       <box flexDirection="column" flexShrink={0} paddingLeft={1} paddingRight={1} marginTop={1}>
+        {menu}
         {prompt}
         {hints}
       </box>

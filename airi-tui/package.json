@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@firecrawl/anydoc": "^0.2.4",
     "@opentui/core": "^0.6.1",
     "@opentui/react": "^0.6.1",
     "kokoro-js": "^1.2.1",
