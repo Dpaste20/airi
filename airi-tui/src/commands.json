@@ -1,0 +1,8 @@
+[
+  {
+    "name": "attachfile",
+    "description": "Attach files: opens a file picker, or give a path",
+    "args": "[path]",
+    "optionalArgs": true
+  }
+]
