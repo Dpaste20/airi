@@ -14,16 +14,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from agno.agent import Agent
-from agno.models.ollama import Ollama
 
-from agno.tools.youtube import YouTubeTools
+from dotenv import load_dotenv
+load_dotenv()
+
+from agno.models.openai.like import OpenAILike
+
+
 from agno.tools.shell import ShellTools
 from toolkits.systemTools import SystemTools
 from toolkits.bashTools import BashTools
+from toolkits.browserTools import BrowserTools
 from agno.skills import Skills, LocalSkills
 from agno.db.sqlite import SqliteDb
 
 from router import route
+
 
 config = json.loads(Path(__file__).with_name("agentConfig.json").read_text())
 
@@ -41,50 +47,76 @@ ASR_FIELDS = {
 _speech_proc: Optional[subprocess.Popen] = None
 
 
-class OllamaThinking(Ollama):
-    """Agno's Ollama adapter ignores Ollama's native `thinking` field."""
+# ---- Model-agnostic thinking support ----
+THINKING_KEYS = ("thinking", "reasoning_content", "reasoning")
+
+
+def _get(obj, key):
+    """dict key / attribute / pydantic extra field, whichever exists."""
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    v = getattr(obj, key, None)
+    if v is None:
+        v = (getattr(obj, "model_extra", None) or {}).get(key)
+    return v
+
+
+def extract_thinking(response) -> str:
+    msgs = [_get(response, "message")]  # native-style responses
+    choices = _get(response, "choices")  # OpenAI-compatible responses
+    if choices:
+        msgs += [_get(choices[0], "delta"), _get(choices[0], "message")]
+    for msg in msgs:
+        for key in THINKING_KEYS:
+            v = _get(msg, key)
+            if isinstance(v, str) and v:
+                return v
+    return ""
+
+
+class ThinkingMixin:
+    """Surface reasoning tokens as model_response.reasoning_content on any provider."""
 
     @staticmethod
-    def _thinking(response) -> str:
-        try:
-            message = response["message"]
-        except (KeyError, TypeError, AttributeError):
-            message = getattr(response, "message", None)
-        if message is None:
-            return ""
-        thinking = (
-            message.get("thinking")
-            if hasattr(message, "get")
-            else getattr(message, "thinking", None)
-        )
-        return thinking or ""
-
-    def _parse_provider_response(self, response):
-        model_response = super()._parse_provider_response(response)
-        thinking = self._thinking(response)
-        if thinking:
-            model_response.reasoning_content = (model_response.reasoning_content or "") + thinking
+    def _merge(model_response, response):
+        if not model_response.reasoning_content:  # adapter already handled it
+            t = extract_thinking(response)
+            if t:
+                model_response.reasoning_content = t
         return model_response
 
-    def _parse_provider_response_delta(self, response):
-        model_response = super()._parse_provider_response_delta(response)
-        thinking = self._thinking(response)
-        if thinking:
-            model_response.reasoning_content = (model_response.reasoning_content or "") + thinking
-        return model_response
+    def _parse_provider_response(self, response, *a, **kw):
+        return self._merge(super()._parse_provider_response(response, *a, **kw), response)
+
+    def _parse_provider_response_delta(self, response, *a, **kw):
+        return self._merge(super()._parse_provider_response_delta(response, *a, **kw), response)
+
+
+class ThinkingOpenAILike(ThinkingMixin, OpenAILike):
+    pass
 
 
 def build_model(spec: str):
-    if spec.startswith("ollama:"):
-        return OllamaThinking(id=spec.split(":", 1)[1])
-    return spec
+    """'provider:model-id' -> model, using the `providers` block in agentConfig.json."""
+    provider, _, model_id = spec.partition(":")
+    cfg = config.get("providers", {}).get(provider)
+    if not cfg or not model_id:
+        return spec  # fall through to Agno's own handling
+    return ThinkingOpenAILike(
+        id=model_id,
+        base_url=cfg["base_url"],
+        api_key=os.environ[cfg["api_key_env"]] if cfg.get("api_key_env") else "none",
+        **cfg.get("params", {}),
+    )
 
 
 system_tools = SystemTools()
 
 agent = Agent(
     model=build_model(config["model"]),
-    tools=[YouTubeTools(), system_tools , ShellTools()],
+    tools=[system_tools, ShellTools(), BrowserTools()],
     db=SqliteDb(db_file="data/agent.db"),
     add_history_to_context=True,
     skills=Skills(loaders=[LocalSkills(str(Path(__file__).parent / "skills"))]),
