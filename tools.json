@@ -53,12 +53,12 @@
       "mode": "hint",
       "threshold": 0.97
     },
-    "youtube": {
-      "description": "A YouTube video, its captions, transcript, or searching YouTube",
+    "run_shell_command": {
+      "description": "Run a shell command, work with files, git, or the terminal",
       "mode": "hint"
     },
-    "shell": {
-      "description": "Run a shell command, work with files, git, or the terminal",
+    "agent_browser": {
+      "description": "Use the web browser: open a website or URL, click, type, search, scroll, read or screenshot a web page",
       "mode": "hint"
     }
   }
